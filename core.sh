@@ -6,8 +6,6 @@ CRON_LINE="* * * * * [ -f /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/
 
 if [ "$ACTION" == "uninstall" ]; then
     echo "=== [AI Deployer] Starting full uninstallation and cleanup ==="
-    
-    # 1. Восстанавливаем оригинальный occ
     if [ -f "$AIO_HTML/occ.original" ]; then
         rm -f "$AIO_HTML/occ" && cp "$AIO_HTML/occ.original" "$AIO_HTML/occ"
         chmod 755 "$AIO_HTML/occ" && chown 33:33 "$AIO_HTML/occ" && rm -f "$AIO_HTML/occ.original"
@@ -15,11 +13,7 @@ if [ "$ACTION" == "uninstall" ]; then
     rm -f "$AIO_HTML/occ-bridge.php"
     rm -rf "$AIO_APPS/ai_bridge"
     docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:remove ai_bridge 2>/dev/null
-    
-    # 2. АВТО-ОЧИСТКА КРОНА: Полностью вырезаем нашу ИИ-строку из Крона хоста
     crontab -l 2>/dev/null | grep -v "nextcloud-ai-recognize-bridge" | crontab -
-    
-    # 3. Стираем Docker-образ
     docker rmi -f nextcloud-ai-recognize-bridge 2>/dev/null
     echo "=== [AI Deployer] System is completely clean now ==="
     exit 0
@@ -29,7 +23,7 @@ echo "=== [AI Deployer] Starting automated deployment from GitHub ==="
 mkdir -p "$AIO_APPS/ai_bridge/appinfo"
 mkdir -p "$AIO_APPS/ai_bridge/lib/BackgroundJob"
 
-# Записываем info.xml
+# 1. Записываем info.xml
 echo '<?xml version="1.0" standalone="yes"?>
 <app>
     <id>ai_bridge</id>
@@ -46,7 +40,7 @@ echo '<?xml version="1.0" standalone="yes"?>
     </dependencies>
 </app>' > "$AIO_APPS/ai_bridge/appinfo/info.xml"
 
-# Записываем Application.php
+# 2. Записываем Application.php
 echo '<?php
 namespace OCA\AiBridge\AppInfo;
 use OCP\AppFramework\App;
@@ -54,7 +48,7 @@ class Application extends App {
     public function __construct(array $urlParams = []) { parent::__construct("ai_bridge", $urlParams); }
 }' > "$AIO_APPS/ai_bridge/appinfo/Application.php"
 
-# Записываем ClassifyJob.php
+# 3. Записываем ClassifyJob.php
 echo '<?php
 namespace OCA\AiBridge\BackgroundJob;
 use OCP\BackgroundJob\TimedJob;
@@ -75,11 +69,18 @@ class ClassifyJob extends TimedJob {
     }
 }' > "$AIO_APPS/ai_bridge/lib/BackgroundJob/ClassifyJob.php"
 
-# Записываем occ-bridge.php
+# Выставляем базовые права и владельца на папку плагина перед его включением
+chmod -R 755 "$AIO_APPS/ai_bridge"
+chown -R 33:33 "$AIO_APPS/ai_bridge"
+
+# 4. СНАЧАЛА ВКЛЮЧАЕМ ПЛАГИН (пусть Nextcloud создаст свои заводские файлы)
+docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:enable ai_bridge --force 2>/dev/null
+
+# 5. ТЕПЕРЬ НАКАТЫВАЕМ ПЕРЕХВАТЧИК (поверх заводских файлов Nextcloud)
 echo '#!/usr/bin/env php
 <?php
 $args = $_SERVER["argv"];
-if (count($args) > 1 && $args === "recognize:classify") {
+if (count($args) > 1 && $args[1] === "recognize:classify") {
     echo "=== [AI Bridge] Intercepted: Request sent to Debian Host ===\n";
     $trigger = __DIR__ . "/recognize.trigger";
     $logFile = __DIR__ . "/recognize.log";
@@ -107,18 +108,22 @@ if (count($args) > 1 && $args === "recognize:classify") {
     require_once __DIR__ . "/occ.original";
 }' > "$AIO_HTML/occ-bridge.php"
 
+# Делаем бэкап оригинального occ, если его еще нет
 if [ -f "$AIO_HTML/occ" ] && [ ! -f "$AIO_HTML/occ.original" ]; then
     cp "$AIO_HTML/occ" "$AIO_HTML/occ.original"
 fi
+
+# Подменяем occ на вызов нашего моста
 echo '<?php require_once "/var/www/html/occ-bridge.php";' > "$AIO_HTML/occ"
 
-chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" && chmod -R 755 "$AIO_APPS/ai_bridge"
-chown -R 33:33 "$AIO_APPS/ai_bridge" "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" "$AIO_HTML/occ.original"
-docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:enable ai_bridge --force 2>/dev/null
+# Фиксируем права доступа на перехватчик
+chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php"
+chown -R 33:33 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" "$AIO_HTML/occ.original"
 
-# АВТО-ДОБАВЛЕНИЕ В КРОН ХОСТА: Проверяем, есть ли строка, если нет — дописываем автоматикой
+# 6. АВТО-ДОБАВЛЕНИЕ В КРОН ХОСТА
 (crontab -l 2>/dev/null | grep -Fq "nextcloud-ai-recognize-bridge") || (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
 
+# 7. СБОРКА ОБРАЗА ИЗ ВАШЕГО GITHUB
 echo "[AI Deployer] Compiling Docker worker image from GitHub..."
 docker build https://github.com/Ridam889/nextcloud-ai-recognize-bridge.git -t nextcloud-ai-recognize-bridge
 echo "=== [AI Deployer] Automated deployment successfully completed! ==="
