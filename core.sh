@@ -73,12 +73,12 @@ chmod -R 755 "$AIO_APPS/ai_bridge" && chown -R 33:33 "$AIO_APPS/ai_bridge"
 # 5. Включаем приложение внутри Nextcloud
 docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:enable ai_bridge --force 2>/dev/null
 
-# 6. НАДЁЖНАЯ ЗАПИСЬ ПЕРЕХВАТЧИКА ЧЕРЕЗ КЛАССИЧЕСКИЙ БЛОК ДЛЯ ТРАНСЛЯЦИИ ЛОГОВ ИИ
+# 6. НАДЁЖНАЯ ЗАПИСЬ ПЕРЕХВАТЧИКА
 cat << 'BRIDGE' > "$AIO_HTML/occ-bridge.php"
 #!/usr/bin/env php
 <?php
 $args = $_SERVER["argv"];
-if (count($args) > 1 && $args[1] === "recognize:classify") {
+if (count($args) > 1 && $args === "recognize:classify") {
     $currentTime = date("H:i:s");
     echo "=== [AI Bridge] Intercepted: Request sent to Debian Host ===\n";
     echo "[AI Bridge] Current container time: [$currentTime]. Processing instantly... \n";
@@ -109,31 +109,31 @@ if (count($args) > 1 && $args[1] === "recognize:classify") {
 }
 BRIDGE
 
-# 7. Восстанавливаем резервную копию occ если нужно и делаем инъекцию строки require_once
 if [ -f "$AIO_HTML/occ" ] && [ ! -f "$AIO_HTML/occ.original" ]; then
     cp "$AIO_HTML/occ" "$AIO_HTML/occ.original"
 fi
 
-# Полностью перезаписываем occ так, чтобы он сначала инклудил наш бридж, а потом выполнял остальную логику
 cat << 'OCC' > "$AIO_HTML/occ"
 <?php
 require_once __DIR__ . '/occ-bridge.php';
 require_once __DIR__ . '/occ.original';
 OCC
 
-# Корректируем права на исполнение
 chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php"
 chown -R 33:33 "$AIO_APPS/ai_bridge" "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" "$AIO_HTML/occ.original"
 
-# --- НАСТРОЙКА СИСТЕМНОГО ДЕМОНА НА ХОСТЕ ---
+# --- УМНАЯ НАСТРОЙКА СИСТЕМНОГО ДЕМОНА С ПРОВЕРКОЙ СТАТУСА ПЛАГИНА ---
 mkdir -p /tmp/nextcloud-ai
 echo '#!/bin/bash
 TRIGGER="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/recognize.trigger"
 LOG_FILE="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/recognize.log"
 while true; do
-    if [ -f "$TRIGGER" ]; then
-        docker run --rm --cpus="10" --net=nextcloud-aio -v /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data:/var/www/html:rw -v /var/lib/docker/volumes/nextcloud_aio_nextcloud_data/_data:/mnt/ncdata:rw -e EXECUTE_IN_NODE=1 nextcloud-ai-recognize-bridge php /var/www/html/occ.original recognize:classify > "$LOG_FILE" 2>&1
-        rm -f "$TRIGGER"
+    # Умная проверка: если плагин активен в системе — обрабатываем триггеры
+    if docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:list | sed -n "/Enabled:/,/Disabled:/p" | grep -q "ai_bridge:"; then
+        if [ -f "$TRIGGER" ]; then
+            docker run --rm --cpus="10" --net=nextcloud-aio -v /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data:/var/www/html:rw -v /var/lib/docker/volumes/nextcloud_aio_nextcloud_data/_data:/mnt/ncdata:rw -e EXECUTE_IN_NODE=1 nextcloud-ai-recognize-bridge php /var/www/html/occ.original recognize:classify > "$LOG_FILE" 2>&1
+            rm -f "$TRIGGER"
+        fi
     fi
     sleep 0.5
 done' > /tmp/nextcloud-ai/ai-daemon.sh
