@@ -1,39 +1,27 @@
 #!/bin/bash
-
 ACTION=$1
 AIO_APPS="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/custom_apps"
 AIO_HTML="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data"
 
 if [ "$ACTION" == "uninstall" ]; then
     echo "=== [AI Deployer] Starting full uninstallation and cleanup ==="
-    
-    # 1. Возвращаем оригинальный заводской occ на место
     if [ -f "$AIO_HTML/occ.original" ]; then
-        rm -f "$AIO_HTML/occ"
-        cp "$AIO_HTML/occ.original" "$AIO_HTML/occ"
-        chmod 755 "$AIO_HTML/occ"
-        chown 33:33 "$AIO_HTML/occ"
-        rm -f "$AIO_HTML/occ.original"
+        rm -f "$AIO_HTML/occ" && cp "$AIO_HTML/occ.original" "$AIO_HTML/occ"
+        chmod 755 "$AIO_HTML/occ" && chown 33:33 "$AIO_HTML/occ" && rm -f "$AIO_HTML/occ.original"
     fi
     rm -f "$AIO_HTML/occ-bridge.php"
-
-    # 2. Удаляем плагин
     rm -rf "$AIO_APPS/ai_bridge"
     docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:remove ai_bridge 2>/dev/null
-
-    # 3. Стираем Docker-образ
-    docker rmi -f nextcloud-recognize-worker 2>/dev/null
+    docker rmi -f nextcloud-ai-recognize-bridge 2>/dev/null
     echo "=== [AI Deployer] System is completely clean now ==="
     exit 0
 fi
 
 echo "=== [AI Deployer] Starting automated deployment from GitHub ==="
-
-# 1. Воссоздаем чистую структуру папок
 mkdir -p "$AIO_APPS/ai_bridge/appinfo"
 mkdir -p "$AIO_APPS/ai_bridge/lib/BackgroundJob"
 
-# 2. Записываем манифест info.xml
+# info.xml
 echo '<?xml version="1.0" standalone="yes"?>
 <app>
     <id>ai_bridge</id>
@@ -50,7 +38,7 @@ echo '<?xml version="1.0" standalone="yes"?>
     </dependencies>
 </app>' > "$AIO_APPS/ai_bridge/appinfo/info.xml"
 
-# 3. Записываем Application.php
+# Application.php
 echo '<?php
 namespace OCA\AiBridge\AppInfo;
 use OCP\AppFramework\App;
@@ -58,7 +46,7 @@ class Application extends App {
     public function __construct(array $urlParams = []) { parent::__construct("ai_bridge", $urlParams); }
 }' > "$AIO_APPS/ai_bridge/appinfo/Application.php"
 
-# 4. Записываем ClassifyJob.php
+# ClassifyJob.php (с новым именем контейнера)
 echo '<?php
 namespace OCA\AiBridge\BackgroundJob;
 use OCP\BackgroundJob\TimedJob;
@@ -72,14 +60,14 @@ class ClassifyJob extends TimedJob {
                  . "-v /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data:/var/www/html:rw "
                  . "-v /var/lib/docker/volumes/nextcloud_aio_nextcloud_data/_data:/mnt/ncdata:rw "
                  . "-e EXECUTE_IN_NODE=1 "
-                 . "nextcloud-recognize-worker php /var/www/html/occ.original recognize:classify > $logFile 2>&1";
-            shell_exec($cmd);
-            @unlink($trigger);
+                 . "nextcloud-ai-recognize-bridge php /var/www/html/occ.original recognize:classify > \$logFile 2>&1";
+            shell_exec(\$cmd);
+            @unlink(\$trigger);
         }
     }
 }' > "$AIO_APPS/ai_bridge/lib/BackgroundJob/ClassifyJob.php"
 
-# 5. Записываем occ-bridge.php
+# occ-bridge.php
 echo '#!/usr/bin/env php
 <?php
 $args = $_SERVER["argv"];
@@ -111,22 +99,15 @@ if (count($args) > 1 && $args === "recognize:classify") {
     require_once __DIR__ . "/occ.original";
 }' > "$AIO_HTML/occ-bridge.php"
 
-# 6. Подменяем occ
 if [ -f "$AIO_HTML/occ" ] && [ ! -f "$AIO_HTML/occ.original" ]; then
     cp "$AIO_HTML/occ" "$AIO_HTML/occ.original"
 fi
 echo '<?php require_once "/var/www/html/occ-bridge.php";' > "$AIO_HTML/occ"
 
-# 7. Права доступа
-chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php"
-chmod -R 755 "$AIO_APPS/ai_bridge"
+chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" && chmod -R 755 "$AIO_APPS/ai_bridge"
 chown -R 33:33 "$AIO_APPS/ai_bridge" "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" "$AIO_HTML/occ.original"
-
-# 8. Включаем плагин внутри Nextcloud
 docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:enable ai_bridge --force 2>/dev/null
 
-# 9. Сборка образа напрямую из репозитория GitHub
 echo "[AI Deployer] Compiling Docker worker image from GitHub..."
-docker build https://github.com/Ridam889/recognize-worker.git -t nextcloud-recognize-worker
-
+docker build https://github.com/Ridam889/nextcloud-ai-recognize-bridge.git -t nextcloud-ai-recognize-bridge
 echo "=== [AI Deployer] Automated deployment successfully completed! ==="
