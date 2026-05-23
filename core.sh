@@ -5,26 +5,18 @@ AIO_HTML="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data"
 
 if [ "$ACTION" == "uninstall" ]; then
     echo "=== [AI Deployer] Starting full uninstallation and cleanup ==="
-    
-    # 1. АВТО-УДАЛЕНИЕ ДЕМОНА С ХОСТА: Останавливаем и полностью вырезаем службу systemd
     systemctl stop nextcloud-ai.service 2>/dev/null
     systemctl disable nextcloud-ai.service 2>/dev/null
     rm -f /etc/systemd/system/nextcloud-ai.service
     systemctl daemon-reload
     rm -rf /tmp/nextcloud-ai/ai-daemon.sh
-
-    # 2. Возвращаем оригинальный occ на место внутри Nextcloud
     if [ -f "$AIO_HTML/occ.original" ]; then
         rm -f "$AIO_HTML/occ" && cp "$AIO_HTML/occ.original" "$AIO_HTML/occ"
         chmod 755 "$AIO_HTML/occ" && chown 33:33 "$AIO_HTML/occ" && rm -f "$AIO_HTML/occ.original"
     fi
     rm -f "$AIO_HTML/occ-bridge.php"
-    
-    # 3. Полностью удаляем папку плагина
     rm -rf "$AIO_APPS/ai_bridge"
     docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:remove ai_bridge 2>/dev/null
-
-    # 4. Стираем тяжелый Docker-образ воркера
     docker rmi -f nextcloud-ai-recognize-bridge 2>/dev/null
     echo "=== [AI Deployer] System is completely clean now ==="
     exit 0
@@ -35,7 +27,7 @@ mkdir -p "$AIO_APPS/ai_bridge/appinfo"
 mkdir -p "$AIO_APPS/ai_bridge/lib/BackgroundJob"
 mkdir -p "$AIO_APPS/ai_bridge/img"
 
-# Записываем info.xml со встроенным тегом standalone для иконки
+# 1. Записываем info.xml со встроенным тегом standalone
 echo '<?xml version="1.0" standalone="yes"?>
 <app>
     <id>ai_bridge</id>
@@ -53,10 +45,10 @@ echo '<?xml version="1.0" standalone="yes"?>
     </dependencies>
 </app>' > "$AIO_APPS/ai_bridge/appinfo/info.xml"
 
-# Генерируем красивую векторную SVG-иконку
+# 2. Генерируем векторную SVG-иконку
 echo '<svg xmlns="http://w3.org" viewBox="0 0 512 512" width="100%" height="100%"><rect width="512" height="512" rx="128" fill="#0082c9"/><path d="M416 192H320v-32c0-35.3-28.7-64-64-64s-64 28.7-64 64v32H96c-17.7 0-32 14.3-32 32v192c0 17.7 14.3 32 32 32h320c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM224 160c0-17.7 14.3-32 32-32s32 14.3 32 32v32h-64v-32zm160 224H128V256h256v128z" fill="#ffffff"/></svg>' > "$AIO_APPS/ai_bridge/img/app.svg"
 
-# Записываем Application.php
+# 3. Записываем Application.php
 echo '<?php
 namespace OCA\AiBridge\AppInfo;
 use OCP\AppFramework\App;
@@ -64,7 +56,7 @@ class Application extends App {
     public function __construct(array $urlParams = []) { parent::__construct("ai_bridge", $urlParams); }
 }' > "$AIO_APPS/ai_bridge/appinfo/Application.php"
 
-# Записываем ClassifyJob.php (нативное фоновое задание)
+# 4. Записываем ClassifyJob.php
 echo '<?php
 namespace OCA\AiBridge\BackgroundJob;
 use OCP\BackgroundJob\TimedJob;
@@ -76,18 +68,16 @@ class ClassifyJob extends TimedJob {
     }
 }' > "$AIO_APPS/ai_bridge/lib/BackgroundJob/ClassifyJob.php"
 
-# Сначала включаем плагин, чтобы ядро Nextcloud создало структуры данных
 chmod -R 755 "$AIO_APPS/ai_bridge" && chown -R 33:33 "$AIO_APPS/ai_bridge"
-docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:enable ai_bridge --force 2>/dev/null
 
-# Теперь поверх накатываем наш интерактивный перехватчик occ-bridge.php
+# 5. НАКАТЫВАЕМ ИСПРАВЛЕННЫЙ ПЕРЕХВАТЧИК С ЧИСТЫМ PHP КОДОМ (Используем одинарные кавычки для безопасности)
 echo '#!/usr/bin/env php
 <?php
 $args = $_SERVER["argv"];
 if (count($args) > 1 && $args === "recognize:classify") {
     $currentTime = date("H:i:s");
     echo "=== [AI Bridge] Intercepted: Request sent to Debian Host ===\n";
-    echo "[AI Bridge] Current container time: [\$currentTime]. Processing instantly... \n";
+    echo "[AI Bridge] Current container time: [$currentTime]. Processing instantly... \n";
     
     $trigger = __DIR__ . "/recognize.trigger";
     $logFile = __DIR__ . "/recognize.log";
@@ -101,14 +91,14 @@ if (count($args) > 1 && $args === "recognize:classify") {
             $f = fopen($logFile, "rb");
             if ($f) {
                 fseek($f, $lastPos);
-                while ((\$line = fgets(\$f)) !== false) { echo \$line; flush(); }
-                $lastPos = ftell(\$f); fclose(\$f);
+                while (($line = fgets($f)) !== false) { echo $line; flush(); }
+                $lastPos = ftell($f); fclose($f);
             }
         }
     }
     if (file_exists($logFile)) {
         $f = fopen($logFile, "rb");
-        if ($f) { fseek($f, $lastPos); while ((\$line = fgets(\$f)) !== false) { echo \$line; } fclose($f); @unlink($logFile); }
+        if ($f) { fseek($f, $lastPos); while (($line = fgets($f)) !== false) { echo $line; } fclose($f); @unlink($logFile); }
     }
     echo "=== [AI Bridge] Processing successfully finished ===\n";
 } else {
@@ -123,7 +113,7 @@ echo '<?php require_once "/var/www/html/occ-bridge.php";' > "$AIO_HTML/occ"
 chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php"
 chown -R 33:33 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" "$AIO_HTML/occ.original"
 
-# --- АВТО-УСТАНОВКА МГНОВЕННОГО ДЕМОНА НА ХОСТ ---
+# Настройка системного демона на хосте
 mkdir -p /tmp/nextcloud-ai
 cat << 'DAEMON' > /tmp/nextcloud-ai/ai-daemon.sh
 #!/bin/bash
