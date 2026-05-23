@@ -2,9 +2,12 @@
 ACTION=$1
 AIO_APPS="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/custom_apps"
 AIO_HTML="/var/lib/docker/volumes/nextcloud_aio_nextcloud/_data"
+CRON_LINE="* * * * * [ -f /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/recognize.trigger ] && docker run --rm --cpus=\"10\" --net=nextcloud-aio -v /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data:/var/www/html:rw -v /var/lib/docker/volumes/nextcloud_aio_nextcloud_data/_data:/mnt/ncdata:rw -e EXECUTE_IN_NODE=1 nextcloud-ai-recognize-bridge php /var/www/html/occ.original recognize:classify > /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/recognize.log 2>&1 && rm -f /var/lib/docker/volumes/nextcloud_aio_nextcloud/_data/recognize.trigger"
 
 if [ "$ACTION" == "uninstall" ]; then
     echo "=== [AI Deployer] Starting full uninstallation and cleanup ==="
+    
+    # 1. Восстанавливаем оригинальный occ
     if [ -f "$AIO_HTML/occ.original" ]; then
         rm -f "$AIO_HTML/occ" && cp "$AIO_HTML/occ.original" "$AIO_HTML/occ"
         chmod 755 "$AIO_HTML/occ" && chown 33:33 "$AIO_HTML/occ" && rm -f "$AIO_HTML/occ.original"
@@ -12,6 +15,11 @@ if [ "$ACTION" == "uninstall" ]; then
     rm -f "$AIO_HTML/occ-bridge.php"
     rm -rf "$AIO_APPS/ai_bridge"
     docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:remove ai_bridge 2>/dev/null
+    
+    # 2. АВТО-ОЧИСТКА КРОНА: Полностью вырезаем нашу ИИ-строку из Крона хоста
+    crontab -l 2>/dev/null | grep -v "nextcloud-ai-recognize-bridge" | crontab -
+    
+    # 3. Стираем Docker-образ
     docker rmi -f nextcloud-ai-recognize-bridge 2>/dev/null
     echo "=== [AI Deployer] System is completely clean now ==="
     exit 0
@@ -21,7 +29,7 @@ echo "=== [AI Deployer] Starting automated deployment from GitHub ==="
 mkdir -p "$AIO_APPS/ai_bridge/appinfo"
 mkdir -p "$AIO_APPS/ai_bridge/lib/BackgroundJob"
 
-# info.xml
+# Записываем info.xml
 echo '<?xml version="1.0" standalone="yes"?>
 <app>
     <id>ai_bridge</id>
@@ -38,7 +46,7 @@ echo '<?xml version="1.0" standalone="yes"?>
     </dependencies>
 </app>' > "$AIO_APPS/ai_bridge/appinfo/info.xml"
 
-# Application.php
+# Записываем Application.php
 echo '<?php
 namespace OCA\AiBridge\AppInfo;
 use OCP\AppFramework\App;
@@ -46,7 +54,7 @@ class Application extends App {
     public function __construct(array $urlParams = []) { parent::__construct("ai_bridge", $urlParams); }
 }' > "$AIO_APPS/ai_bridge/appinfo/Application.php"
 
-# ClassifyJob.php (с новым именем контейнера)
+# Записываем ClassifyJob.php
 echo '<?php
 namespace OCA\AiBridge\BackgroundJob;
 use OCP\BackgroundJob\TimedJob;
@@ -67,12 +75,12 @@ class ClassifyJob extends TimedJob {
     }
 }' > "$AIO_APPS/ai_bridge/lib/BackgroundJob/ClassifyJob.php"
 
-# occ-bridge.php
+# Записываем occ-bridge.php
 echo '#!/usr/bin/env php
 <?php
 $args = $_SERVER["argv"];
 if (count($args) > 1 && $args === "recognize:classify") {
-    echo "=== [AI Bridge] Intercepted: Request sent to Debian Host (TensorFlow CPU) ===\n";
+    echo "=== [AI Bridge] Intercepted: Request sent to Debian Host ===\n";
     $trigger = __DIR__ . "/recognize.trigger";
     $logFile = __DIR__ . "/recognize.log";
     if (file_exists($logFile)) { @unlink($logFile); }
@@ -107,6 +115,9 @@ echo '<?php require_once "/var/www/html/occ-bridge.php";' > "$AIO_HTML/occ"
 chmod 755 "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" && chmod -R 755 "$AIO_APPS/ai_bridge"
 chown -R 33:33 "$AIO_APPS/ai_bridge" "$AIO_HTML/occ" "$AIO_HTML/occ-bridge.php" "$AIO_HTML/occ.original"
 docker exec --user www-data -w /var/www/html nextcloud-aio-nextcloud php occ app:enable ai_bridge --force 2>/dev/null
+
+# АВТО-ДОБАВЛЕНИЕ В КРОН ХОСТА: Проверяем, есть ли строка, если нет — дописываем автоматикой
+(crontab -l 2>/dev/null | grep -Fq "nextcloud-ai-recognize-bridge") || (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
 
 echo "[AI Deployer] Compiling Docker worker image from GitHub..."
 docker build https://github.com/Ridam889/nextcloud-ai-recognize-bridge.git -t nextcloud-ai-recognize-bridge
